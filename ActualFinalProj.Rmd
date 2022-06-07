@@ -1,0 +1,622 @@
+---
+title: "Econ 187 Final Project"
+author: "Josh Chan & Jaden Locke"
+date: "5/28/2022"
+output: html_document
+---
+#project goal
+Machine Learning regression techniques using gigantic datasets to predict the severity of car accidents in the contiguous US
+Quantify risk factors of getting into an accident in any particular geographical area
+
+#Models used
+Boruta and feature selection models for dimensionality reduction
+Regression: 
+  linear models: lm, ridge/lasso/enet
+  nonlinear models: GAM, GAM + tensor
+  SVR
+  Trees: regression Tree, boosting
+  
+```{r setup, include=FALSE}
+library(knitr)
+library(png)
+opts_chunk$set(tidy.opts=list(width.cutoff=60))
+options(rgl.printRglwidget = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/joshu/OneDrive/Desktop/UCLA/Spring 2022/187/Proj3")
+  #getting dataset
+```
+
+```{r libraries, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
+library(POE5Rdata)
+library(tm)
+library(rlang)
+library(ggplot2)
+library(dplyr)
+library(plyr)
+library(foreign)
+library(xts)
+library(tis)
+library(jsonlite)
+library(FNN)
+library(RColorBrewer)
+library(MASS)
+library(tseries)
+library(readtext)
+library(tidyr)
+library(scales)
+library(tinytex)
+library(fitdistrplus)
+library(broom)
+library(car)
+library(pastecs)
+library(olsrr)
+library(Rcpp)
+library(forecast)
+#library(gt)
+library(dynlm)
+library(stats)
+library(ARDL)
+library(pim)
+library(tsDyn)
+library(zoo)
+library(TSA)
+library(timeSeries)
+library(fUnitRoots)
+library(fBasics)
+library(timsac)
+library(TTR)
+library(fpp)
+library(strucchange)
+library(vars)
+library(lmtest)
+library(dlnm)
+library(KFAS)
+library(dLagM)
+library(FKF)
+library(stargazer)
+library(AER)
+library(glmnet)
+library(psych)
+library(plm)
+library(caret)
+library(vip)
+library(fpp2)
+library(fma)
+library(corrplot)
+library(quantmod)
+library(fredr)
+library(nlstools)
+library(rugarch)
+library(fpp3)
+library(MuMIn)
+library(dygraphs)
+library(PerformanceAnalytics)
+library(tibble)
+library(timetk)
+library(plotly)
+library(e1071)
+library(ISLR2)
+library(rpart)
+library(tree)
+library(randomForest)
+library(BART)
+library(gbm)
+library(Boruta)
+library(Ryacas)
+library(ggmap)
+library(R.utils)
+library(combinat)
+library(splines)
+library(leaps)
+library(gam)
+library(mgcv)
+library(factoextra)
+library(ClusterR)
+library(cluster)
+library(pls)
+library(MLmetrics)
+library(usmap)
+library(plotmo)
+```
+
+#Dataset Loading and Cleaning
+```{r}
+accdata = read.csv ("accident_data.csv")[,-1]
+
+## Removing Unnecessary Variables
+drop <- c("End_Lat","Start_Time","End_Time","End_Lng","Civil_Twilight","Nautical_Twilight","Astronomical_Twilight","Turning_Loop","Sunrise_Sunset","Wind_Direction", "Weather_Condition")
+accdata <- accdata[,!names(accdata) %in% drop]
+accdata[1:10,]
+```
+
+```{r}
+## Mapping accident severity by state
+statevalues <- aggregate(accdata$Severity, list(accdata$State), FUN = mean)
+names(statevalues) <- c("state","value")
+plot_usmap(data = statevalues, values = "value", color = "black", exclude = c("AK","HI")) +
+  ggtitle("Average Accident Severity by State") +
+  scale_fill_continuous(name = "Average Accident Severity", label = scales::comma, 
+                        low = "white", high = "red", limit = c(1,4)) +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+#Ordinal Encoding Boolean Predictors
+encode_ordinal <- function(x, order = unique(x)) {
+  x <- as.numeric(factor(x, levels = order, exclude = NULL))
+  #False encoded as 1, true encoded as 2
+}
+
+for (i in 1:length(accdata[, 12:23]))
+{
+  accdata[, i+11] = encode_ordinal(accdata[[i+11]])
+}
+accdata$Side = encode_ordinal(accdata[["Side"]])
+  #1 = Right, 2 = Left
+accdata
+```
+
+```{r}
+#Binary encoding state column to use in regression analysis
+
+binencode <- function(column,data) {
+  variable <- data %>% select(column)
+  unq <- length(unique(variable)[,1])
+  num <- ceiling(log(unq, base = 2))
+  outputmat <- matrix(nrow = unq, ncol = (num + 1))
+  outputmat[,1] <- unique(variable)[,1]
+  for (i in 1:num) {
+    outputmat[,i+1] <- rep(rep(c(0,1), times = c(2^(num-i),2^(num-i))),length.out = unq)
+  }
+
+
+  indexmat <- matrix(nrow =nrow(data), ncol = num+1)
+  indexmat[,1] <- variable[,1]
+  for (i in 1:nrow(data)){
+      for (j in 2:num) {
+    indexmat[i,j] <- outputmat[match(indexmat[i,1],outputmat[,1]),j]
+    }
+  }
+  indexmat <- data.frame(indexmat)
+  names(indexmat)[2:num] <- paste0(column,seq(1,(num-1),by = 1))
+  data <- data.frame(data,cbind(indexmat[,2:num]))
+  data <- data[,!names(data) %in% column]
+} 
+
+data_fin <- binencode(column = "State", data = accdata)
+
+cols.num <- c("State1","State2", "State3", "State4", "State5")
+data_fin[cols.num] <- sapply(data_fin[cols.num],as.numeric)
+data_fin
+```
+
+
+```{r}
+# Dividing into training/test set
+set.seed(31415)
+
+train <- data_fin[1:100000,]
+test <- data_fin[100001:125000,]
+y = data_fin$Severity[1:125000]
+```
+
+```{r}
+# Separating variable classes
+
+numeric_names <- c("Distance.mi.","Temperature.F.","Wind_Chill.F.","Humidity...", "Pressure.in.", "Visibility.mi.","Wind_Speed.mph." ,"Precipitation.in.")
+categoric <- paste(names(train[,!names(train) %in% cbind(numeric_names,"Severity")]),collapse ="+")
+numeric <- names(train[,names(train) %in% numeric_names])
+```
+
+```{r}
+# Dividing into smaller training/test set for SVR
+
+set.seed(31415)
+
+train2 <- train[1:10000,]
+test2 <- train[10001:12500,]
+y2 = data_fin$Severity[1:12500]
+```
+
+```{r}
+# Model Feature Selection
+boruta.train = Boruta(Severity ~ ., data = train2)
+print(boruta.train)
+
+plot(boruta.train, xlab = "", xaxt = "n")
+lz<-lapply(1:ncol(boruta.train$ImpHistory),function(i)
+boruta.train$ImpHistory[is.finite(boruta.train$ImpHistory[,i]),i])
+names(lz) <- colnames(boruta.train$ImpHistory)
+Labels <- sort(sapply(lz,median))
+axis(side = 1,las=2,labels = names(Labels),
+at = 1:ncol(boruta.train$ImpHistory), cex.axis = 0.7)
+
+final.boruta <- TentativeRoughFix(boruta.train)
+print(final.boruta)
+
+plot(final.boruta, xlab = "", xaxt = "n")
+lz<-lapply(1:ncol(final.boruta$ImpHistory),function(i)
+final.boruta$ImpHistory[is.finite(final.boruta$ImpHistory[,i]),i])
+names(lz) <- colnames(final.boruta$ImpHistory)
+Labels <- sort(sapply(lz,median))
+axis(side = 1,las=2,labels = names(Labels),
+at = 1:ncol(final.boruta$ImpHistory), cex.axis = 0.7)
+
+inf_pred = getSelectedAttributes(final.boruta, withTentative = F)
+inf_pred
+```
+
+inf_pred [1] "Distance.mi."   "Temperature.F." "Wind_Chill.F."  "Humidity..."   
+ [5] "Pressure.in."   "Visibility.mi." "Crossing"       "State1"        
+ [9] "State2"         "State4"         "State5"  
+
+```{r}
+# Linear Model
+formula <- reformulate(paste("Severity~",paste(numeric,collapse = "+"),"+",categoric))
+lin.mod <- glm(formula, data = train)
+
+lin.pred <- predict(lin.mod,test)
+lin.rmse <- sqrt(mean((test$Severity-lin.pred)^2))
+cat("Linear Model Test RMSE = ", lin.rmse)
+
+vip(lin.mod)
+```
+Linear Model Test RMSE = 0.3708
+
+```{r}
+# Feature Selection Models
+library(plotmo)
+
+xtrain <- data.matrix(train[,!names(train) %in% "Severity"])
+ytrain <- data.matrix(train[,names(train) %in% "Severity"])
+xtest <- data.matrix(test[,!names(test) %in% "Severity"])
+
+## LASSO
+lasso.cv <- cv.glmnet(x = xtrain, y = ytrain,  alpha = 1)
+lasso.mod <- glmnet(x = xtrain, y = ytrain, alpha = 1, lambda = lasso.cv$lambda.min)
+lasso.pred <- predict(lasso.mod,xtest)
+lasso.rmse <- sqrt(mean((test$Severity-lasso.pred)^2))
+cat("LASSO Model Test RMSE = ", lasso.rmse,"\n")
+
+## Ridge
+ridge.cv <- cv.glmnet(x = xtrain, y = ytrain,  alpha = 0)
+ridge.mod <- glmnet(x = xtrain, y = ytrain, alpha = 1, lambda = ridge.cv$lambda.min)
+ridge.pred <- predict(ridge.mod,xtest)
+ridge.rmse <- sqrt(mean((test$Severity-ridge.pred)^2))
+cat("Ridge Model Test RMSE = ", ridge.rmse,"\n")
+
+## Elastic Net
+enet_results <- c()
+alpha <- seq(0,1,by = 0.1)
+for(i in alpha) {
+  enet.cv<- cv.glmnet(x = xtrain, y = ytrain,  alpha = i)
+  enet_results[i] <- min(enet.cv$cvm)
+}
+enet.cv <- cv.glmnet(x = xtrain, y = ytrain,  alpha = alpha[which.min(enet_results)])
+enet.mod <- glmnet(x = xtrain, y = ytrain, alpha = alpha[which.min(enet_results)], lambda = enet.cv$lambda.min)
+enet.pred <- predict(enet.mod,xtest)
+enet.rmse <- sqrt(mean((test$Severity-enet.pred)^2))
+cat("Elastic Net Model Test RMSE = ", enet.rmse,"\n")
+
+par(mfrow = c(1,3))
+plot_glmnet(lasso.cv$glmnet.fit, xvar= "lambda", label = 5, main = "LASSO Coefficients vs. Log-Lambda")
+abline(v = log(lasso.cv$lambda.min),col = "red")
+plot_glmnet(ridge.cv$glmnet.fit, xvar= "lambda", label =5, main = "Ridge Coefficients vs. Log-Lambda")
+abline(v = log(ridge.cv$lambda.min),col = "red")
+plot_glmnet(enet.cv$glmnet.fit, xvar= "lambda", label = 5, main = "Elastic Net Coefficients vs. Log-Lambda")
+abline(v = log(enet.cv$lambda.min),col = "red")
+# Across the models, state, giving way, junctions, and exits are the largest predictors of accident severity
+  # Giving Way - yield signs
+  # Junctions - any kind of road junction
+  # No Exit - road is obstructed with no continuing path
+```
+LASSO Model Test RMSE =  0.3708123 
+Ridge Model Test RMSE =  0.3714753 
+Elastic Net Model Test RMSE =  0.3708588
+
+```{r}
+# Nonlinear Models
+
+## GAMs
+
+### Finding optimal parameter smoothers
+
+#### Constructing function combination set
+n <- length(numeric)
+functions <- c("lo(","ns(","s(","bs(")
+nfunc <- length(functions)
+comb <- matrix(ncol = n, nrow = nfunc)
+
+for(j in 1:n) {
+  for (i in 1:nfunc) {
+    comb[i,j] <- paste(functions[i],numeric[j],")")
+  }
+}
+
+### Determining Optimal Combination Individual Smoothers
+
+permutations <- permn(1:8)
+perm_sample <- sample(permutations,10)
+
+optim_res <- matrix(ncol= 2, nrow = length(perm_sample))
+               
+for (g in 1:length(perm_sample)) {
+  optim_mat <- matrix(nrow = nfunc,ncol =n)
+  optim <- c()
+  er <- c()
+  for (i in 1:nfunc) {
+      optim_mat[i,perm_sample[[g]][1]] <- mgcv::gam(reformulate(paste("Severity ~",comb[i,perm_sample[[g]][1]],"+",categoric)),data = train)$gcv.ubre
+  }
+  optim[1] <- comb[which.min(optim_mat[,perm_sample[[g]][1]]),perm_sample[[g]][1]]
+  er <- min(optim_mat[,perm_sample[[g]][1]])
+    
+    
+  for (j in 2:n) {
+    
+    for(k in 1:nfunc){
+      optim_mat[k,perm_sample[[g]][j]] <- mgcv::gam(reformulate(paste("Severity~",paste(optim,collapse = "+"),"+",comb[k,perm_sample[[g]][j]],"+",categoric)),data = train)$gcv.ubre
+      }
+     optim[j] <- comb[which.min(optim_mat[,perm_sample[[g]][j]]),perm_sample[[g]][j]]
+     er[j] <- min(optim_mat[,perm_sample[[g]][j]])
+  }
+  optim_res[g,1] <- paste(optim,collapse = "+")
+  optim_res[g,2] <- er[n]
+}
+smoothcomb <- print(optim_res[which.min(optim_res[,2]),1])
+gam.mod <- mgcv::gam(reformulate(paste("Severity ~",smoothcomb,"+",categoric)),data = train)
+gam.pred <- predict(gam.mod,test)
+gam.rmse <- sqrt(mean((test$Severity-gam.pred)^2))
+cat("GAM Model Test RMSE = ", gam.rmse,"\n")
+```
+GAM Model Test RMSE = 0.3692
+
+```{r}
+# GAM w/ One Tensor
+
+## Generating first tensor
+  
+ten_mat <- matrix(nrow = ntens^n,ncol = ntens)
+ten_mat[,1] <- rep(numeric, times = 1, each =n)
+ten_mat[,2] <- rep(numeric, times = n, each =1) 
+ten_mat <- subset(ten_mat,ten_mat[,1] != ten_mat[,2])
+  
+
+
+ten_vec<-c()
+for (i in 1:nrow(ten_mat)) {
+    ten_vec[i] <- paste("te(",paste(ten_mat[i,],collapse = ","),")")
+}
+  
+score <- c()
+for (i in 1:length(ten_vec)) {
+    mod <- mgcv::gam(reformulate(paste("Severity ~",paste(optim,collapse = "+"),"+",categoric,"+",ten_vec[i])),data = train)
+    score[i] <- mod$gcv.ubre
+    print[i]
+}
+
+tensor <- ten_vec[which.min(score)]
+
+print(tensor)
+gam.te.mod <- mgcv::gam(reformulate(paste("Severity ~",paste(optim,collapse = "+"),"+",categoric,"+",paste(tensor,collapse="+"))),data = train)
+gam.te.pred <- predict(gam.te.mod,test)
+gam.te.rmse <- sqrt(mean((test$Severity-gam.te.pred)^2))
+cat("GAM Model Test RMSE = ", gam.te.rmse,"\n")
+```
+GAM Model Test RMSE = 0.3562
+
+```{r}
+# SVR Model (10000 observations)
+
+## Keep testing SVR model using increasing test/train samples and cross validation
+svr.fit <- svm(Severity ~ Distance.mi. + Temperature.F. + Wind_Chill.F. + Humidity... +
+                 Pressure.in. + Visibility.mi. + Crossing + State1 + State2 + State3 +
+                 State4 + State5, data = train2, kernel = "linear", 
+                 cost = 10, scale = FALSE)
+svr.pred = predict(svr.fit, test2)
+cat ("SVR RMSE:", RMSE(svr.pred, y2), "\n")
+```
+SVR RMSE: 0.4003373
+
+```{r}
+## 2nd svr using scaled data (10000 observations still)
+svr.fit2 <- train(
+  Severity ~ Distance.mi. + Temperature.F. + Wind_Chill.F. + Humidity... +
+            Pressure.in. + Visibility.mi. + Crossing + State1 + State2 + State3 +
+            State4 + State5,
+    data = train2,
+    method = 'svmLinear',
+    preProcess = c("center", "scale")
+)
+svr.pred2 = predict(svr.fit2, test2)
+cat ("SVR Scaled RMSE:", RMSE(svr.pred2, y2), "\n")
+```
+SVR Scaled RMSE: 0.3716184  
+
+```{r}
+## svr cross validation 
+ctrl <- trainControl(
+  method = "cv",
+  number = 10,
+)
+
+tune <- expand.grid(
+  C = c(.01, 0.25, .5, 1)
+)
+
+svr.fit3 <- train(
+  Severity ~ Distance.mi. + Temperature.F. + Wind_Chill.F. + Humidity... +
+            Pressure.in. + Visibility.mi. + Crossing + State1 + State2 + State3 +
+            State4 + State5,
+    data = train2,
+    method = 'svmLinear',
+    preProcess = c("center", "scale"),
+    trControl  = ctrl,
+    tuneGrid = tune
+)
+
+svr.fit3
+svr.pred3 = predict(svr.fit3, test2)
+cat ("SVR Scaled and cross validated RMSE:", RMSE(svr.pred3, y2), "\n")
+```
+SVR Scaled and Tuned Hyperparameters RMSE: 0.3716184    
+
+```{r}
+# Tree Models (100000 observations) 
+
+traintr = data_fin[1:100000,]
+testtr <- data_fin[100001:125000,]
+ytr = data_fin$Severity[100001:125000]
+
+nrow(traintr)
+nrow(testtr)
+length(ytr)
+```
+
+```{r}
+# Regression tree
+tree.fit <- tree(Severity ~
+            Distance.mi. + Temperature.F. + Wind_Chill.F. + Humidity... +
+            Pressure.in. + Visibility.mi. + Crossing + State1 + State2 + State3 +
+            State4 + State5, data = traintr, control = 
+            tree.control(nobs = nrow(traintr), mincut = 2, minsize = 4, mindev = .01))
+summary(tree.fit)
+plot(tree.fit)
+text(tree.fit, pretty = 0)
+
+cv.fin <- cv.tree(tree.fit)
+plot(cv.fin$size, cv.fin$dev, type = "b")
+  #optimal size = 2
+
+tree.pred <- predict(tree.fit, newdata = testtr)
+cat ("Tree RMSE:", RMSE(tree.pred, ytr), "\n")
+```
+Tree RMSE: 0.3765839    
+
+```{r warning=FALSE}
+# Boosting
+
+treevars <- c("Distance.mi.","Temperature.F.","Wind_Chill.F.","Humidity...","Pressure.in.","Visibility.mi.","Crossing","State1","State2","State3","State4","State5")
+boostform <- reformulate(paste("Severity~",paste(treevars,collapse = "+")))
+
+## Optimizing Interaction Depth
+iter = seq(1:5)
+er <- c()
+for (i in seq_along(iter)){
+  boost.mod <- gbm(boostform, data = traintr, distribution = "gaussian",interaction.depth = iter[i])
+  boost.pred <- predict(boost.mod, newdata = testtr)
+  cat ("Boosted RMSE:", RMSE(boost.pred, ytr), "\n")
+  er[i] <- RMSE(boost.pred, ytr)
+}
+indep <- iter[which.min(er)]
+print(indep)
+```
+
+```{r}
+# Optimizing ntrees
+iter = seq(500,3000,by = 500)
+er <- c()
+for (i in seq_along(iter)){
+  boost.mod <- gbm(boostform, data = traintr, distribution = "gaussian", n.trees = iter[i], interaction.depth = indep)
+  boost.pred <- predict(boost.mod, newdata = testtr)
+  cat ("Boosted RMSE:", RMSE(boost.pred, ytr), "\n")
+  er[i] <- RMSE(boost.pred, ytr)
+}
+n_tree <- iter[which.min(er)]
+print(n_tree)
+```
+
+```{r warning=FALSE}
+iter = c(.001, .01,.05, .1, .2)
+er<-c()
+for (i in seq_along(iter)){
+  boost.mod <- gbm(boostform, data = traintr, distribution = "gaussian", n.trees = n_tree,interaction.depth = indep, shrinkage = iter[i])
+  boost.pred <- predict(boost.mod, newdata = testtr)
+  cat ("Boosted RMSE:", RMSE(boost.pred, ytr), "\n")
+  er[i] <- RMSE(boost.pred, ytr)
+}
+shrink <- iter[which.min(er)]
+boost.mod <-   boost.mod <- gbm(boostform, data = traintr, distribution = "gaussian", n.trees = n_tree,interaction.depth = indep, shrinkage = shrink)
+boost.pred <- predict(boost.mod, newdata = testtr)
+cat ("Boost RMSE:", RMSE(boost.pred, ytr), "\n")
+summary(boost.mod)
+vip(boost.mod)
+
+```
+Optimal hyperparameters: n_tree = 1000, indep = 5, shrink = .1
+
+```{r}
+#hardcoded optimal boosting mod
+n_tree = 1000
+indep = 5
+shrink = .1
+boost.mod <- gbm(boostform, data = traintr, distribution = "gaussian",
+              n.trees = n_tree,interaction.depth = indep, shrinkage = shrink)
+boost.pred <- predict(boost.mod, newdata = testtr)
+cat ("Boost RMSE:", RMSE(boost.pred, ytr), "\n")
+summary(boost.mod)
+vip(boost.mod)
+```
+Boost RMSE: 0.3540
+
+```{r}
+#optimal models
+Name <- c("Linear", "Lasso", "Ridge", "E-Net", "SVR", "GAM", "GAM+Tensor", "Tree",
+          "Boosting")
+RMSE <- c(.3708, 0.3772, .3864, 0.3780, 0.3716184, 0.3692, .3562, .3765839, 0.3540)
+
+plot(x = Name, y = RMSE, xlim = c(.3, .4))
+```
+
+```{r}
+# Plotting test set severity by state
+test_state <- data.frame(cbind(test,accdata$State[100001:125000]))
+names(test_state) <- append(names(test),"State")
+statevalues <- aggregate(test_state$Severity, list(test_state$State), FUN = mean)
+names(statevalues) <- c("state","value")
+plot_usmap(data = statevalues, values = "value", color = "black", exclude = c("AK","HI")) +
+  ggtitle("Actual Test Set Average Severity by State") +
+  scale_fill_continuous(name = "Average Accident Severity", 
+  label = scales::comma,limits = c(1,4), low = "white", high = "red") +
+  theme(legend.position = "bottom")
+
+#plotting predictions test set severity using best GAM + tensor model
+test_state2 <- data.frame(cbind(accdata[100001:125000,],gam.te.pred))
+names(test_state2) <- append(names(accdata),"pred")
+statevalues2 <- aggregate(test_state2$pred, list(test_state2$State), FUN = mean)
+names(statevalues2) <- c("state","value")
+
+plot_usmap(data = statevalues2, values = "value", color = "black", exclude = c("AK","HI")) +
+  ggtitle("Predicted Test Set Average Severity by State") +
+  scale_fill_continuous(name = "Average Accident Severity", label = scales::comma,
+  limits = c(1,4),low = "white", high = "red") +
+  theme(legend.position = "bottom")
+
+plot_usmap(data = statevalues2, values = "value", color = "black", exclude = c("AK","HI")) +
+  ggtitle("Predicted Test Set Average Severity by State (scaled)") +
+  scale_fill_continuous(name = "Average Accident Severity", label = scales::comma,
+  low = "white", high = "red") + 
+  theme(legend.position = "bottom")
+```
+
+```{r}
+#local region variable importance
+CAdata <- accdata[ which(accdata$State=='CA'), ]
+boost.ca <- gbm(Severity ~ ., data = CAdata[,-4], distribution = "gaussian",
+                n.trees = n_tree,interaction.depth = indep, shrinkage = shrink)
+vip(boost.ca)
+
+#boosting with local WA
+WAdata <- accdata[ which(accdata$State=='WA'), ]
+boost.wa <- gbm(Severity ~ ., data = WAdata[,-4], distribution = "gaussian",
+                n.trees = n_tree,interaction.depth = indep, shrinkage = shrink)
+vip(boost.wa)
+
+summary(boost.wa)
+summary(boost.ca)
+```
+
+
+
+
+
+
+
