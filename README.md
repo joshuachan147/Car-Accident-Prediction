@@ -16,6 +16,7 @@ https://www.kaggle.com/datasets/sobhanmoosavi/us-accidents
  - Boruta
  - GAM with tensors
  - Regression Tree
+ - Support Vector Regression
  - Gradient Boosting Algorithm
 
 
