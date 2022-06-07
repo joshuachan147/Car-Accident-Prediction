@@ -11,4 +11,11 @@ https://www.kaggle.com/datasets/sobhanmoosavi/us-accidents
  - Response: Numeric variable 1-4 measuring car accident severity (severity measured in road disruption time)
 
 **Model Choices**
- - 
+ - Linear Model
+ - Feature Selection Models (Lasso/Ridge/Elastic Net)
+ - Boruta
+ - GAM with tensors
+ - Regression Tree
+ - Gradient Boosting Algorithm
+
+
